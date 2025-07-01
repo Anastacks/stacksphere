@@ -627,3 +627,241 @@ describe("Reward Functions", () => {
     expect(result).toBeErr(Cl.uint(103)); // ERR_NOT_STAKED
   });
 });
+
+describe("Edge Cases and Error Handling", () => {
+  it("should handle reward calculation with zero pending rewards", () => {
+    // Stake but don't mine any blocks
+    simnet.callPublicFn(
+      contractName,
+      "fund-reward-pool",
+      [Cl.uint(10000000)],
+      contractOwner
+    );
+    
+    simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(1000000), Cl.uint(1008)],
+      user1
+    );
+
+    const { result } = simnet.callReadOnlyFn(
+      contractName,
+      "get-pending-rewards",
+      [Cl.principal(user1)],
+      user1
+    );
+    
+    expect(result).toBeUint(0);
+  });
+
+  it("should handle insufficient reward pool for claims", () => {
+    // Small reward pool
+    simnet.callPublicFn(
+      contractName,
+      "fund-reward-pool",
+      [Cl.uint(1000)],
+      contractOwner
+    );
+    
+    simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(50000000), Cl.uint(4032)], // Large stake
+      user1
+    );
+    
+    // Mine many blocks to generate large rewards
+    simnet.mineEmptyBlocks(1000);
+
+    const { result } = simnet.callPublicFn(
+      contractName,
+      "claim-rewards",
+      [],
+      user1
+    );
+    
+    expect(result).toBeErr(Cl.uint(101)); // ERR_INSUFFICIENT_BALANCE
+  });
+
+  it("should correctly handle multiple stake/unstake cycles", () => {
+    simnet.callPublicFn(
+      contractName,
+      "fund-reward-pool",
+      [Cl.uint(10000000)],
+      contractOwner
+    );
+
+    // First stake cycle
+    simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(1000000), Cl.uint(1008)],
+      user1
+    );
+    
+    // Emergency unstake
+    simnet.callPublicFn(
+      contractName,
+      "emergency-unstake",
+      [],
+      user1
+    );
+
+    // Second stake cycle should work
+    const { result } = simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(2000000), Cl.uint(1008)],
+      user1
+    );
+    
+    expect(result).toBeOk(Cl.uint(2000000));
+  });
+
+  it("should return updated contract stats after staking", () => {
+    simnet.callPublicFn(
+      contractName,
+      "fund-reward-pool",
+      [Cl.uint(10000000)],
+      contractOwner
+    );
+    
+    simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(1000000), Cl.uint(1008)],
+      user1
+    );
+    
+    simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(10000000), Cl.uint(2016)],
+      user2
+    );
+
+    const stats = simnet.callReadOnlyFn(
+      contractName,
+      "get-contract-stats",
+      [],
+      user1
+    );
+    
+    expect(stats.result).toEqual(
+      Cl.tuple({
+        "total-staked": Cl.uint(11000000), // 1M + 10M from both users
+        "total-rewards-distributed": Cl.uint(0),
+        "reward-rate": Cl.uint(100),
+        "minimum-stake": Cl.uint(1000000),
+        "reward-pool": Cl.uint(10000000),
+        "contract-paused": Cl.bool(false)
+      })
+    );
+  });
+});
+
+describe("Integration Tests", () => {
+  it("should handle complete staking lifecycle", () => {
+    // Setup
+    simnet.callPublicFn(
+      contractName,
+      "fund-reward-pool",
+      [Cl.uint(10000000)],
+      contractOwner
+    );
+
+    // Stake
+    const stakeResult = simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(10000000), Cl.uint(2016)],
+      user1
+    );
+    expect(stakeResult.result).toBeOk(Cl.uint(10000000));
+
+    // Mine blocks to generate rewards
+    simnet.mineEmptyBlocks(500);
+
+    // Claim rewards
+    const claimResult = simnet.callPublicFn(
+      contractName,
+      "claim-rewards",
+      [],
+      user1
+    );
+    expect(claimResult.result).toBeOk(Cl.some(Cl.uint(1)));
+
+    // Mine more blocks to expire lock
+    simnet.mineEmptyBlocks(1600);
+
+    // Unstake
+    const unstakeResult = simnet.callPublicFn(
+      contractName,
+      "unstake",
+      [],
+      user1
+    );
+    expect(unstakeResult.result).toBeOk(
+      Cl.tuple({
+        "staked-amount": Cl.uint(10000000),
+        "rewards-claimed": Cl.some(Cl.uint(1))
+      })
+    );
+  });
+
+  it("should handle multiple users staking different tiers", () => {
+    simnet.callPublicFn(
+      contractName,
+      "fund-reward-pool",
+      [Cl.uint(50000000)],
+      contractOwner
+    );
+
+    // User 1: Tier 1
+    const stake1 = simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(1000000), Cl.uint(1008)],
+      user1
+    );
+    expect(stake1.result).toBeOk(Cl.uint(1000000));
+
+    // User 2: Tier 2
+    const stake2 = simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(10000000), Cl.uint(2016)],
+      user2
+    );
+    expect(stake2.result).toBeOk(Cl.uint(10000000));
+
+    // Contract owner: Tier 3
+    const stake3 = simnet.callPublicFn(
+      contractName,
+      "stake",
+      [Cl.uint(50000000), Cl.uint(4032)],
+      contractOwner
+    );
+    expect(stake3.result).toBeOk(Cl.uint(50000000));
+
+    // Check total staked
+    const stats = simnet.callReadOnlyFn(
+      contractName,
+      "get-contract-stats",
+      [],
+      user1
+    );
+    
+    expect(stats.result).toEqual(
+      Cl.tuple({
+        "total-staked": Cl.uint(61000000),
+        "total-rewards-distributed": Cl.uint(0),
+        "reward-rate": Cl.uint(100),
+        "minimum-stake": Cl.uint(1000000),
+        "reward-pool": Cl.uint(50000000),
+        "contract-paused": Cl.bool(false)
+      })
+    );
+  });
+});
